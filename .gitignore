@@ -4,3 +4,5 @@ expert_models/*
 pretrained_models/*
 trained_models/*
 *.pyc
+chess_model_checkpoints/
+chess_tb_logs/

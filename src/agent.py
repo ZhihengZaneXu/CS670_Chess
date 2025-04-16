@@ -7,6 +7,11 @@ import torch.nn as nn
 import torch.optim as optim
 from gym import spaces
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    CallbackList,
+    CheckpointCallback,
+)
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from torch.distributions import Categorical
@@ -14,6 +19,20 @@ from torch.distributions import Categorical
 from .environment import ChessEnv
 from .network import ChessNetwork
 from .utils import board_to_tensor, move_to_direction_idx, selections_to_move
+
+
+class FrequentLoggingCallback(BaseCallback):
+    """Callback for logging metrics more frequently to TensorBoard"""
+
+    def __init__(self, verbose=0, log_freq=100):
+        super(FrequentLoggingCallback, self).__init__(verbose)
+        self.log_freq = log_freq  # How often to log stats
+
+    def _on_step(self):
+        if self.n_calls % self.log_freq == 0:
+            # Force logger to dump data to disk
+            self.logger.dump(self.num_timesteps)
+        return True
 
 
 class ChessFeatureExtractor(BaseFeaturesExtractor):
@@ -181,19 +200,25 @@ class ChessRLAgent:
         max_grad_norm=0.5,
         gae_lambda=0.95,
         clip_range=0.2,
-        device="auto",
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        tensorboard_log="./chess_tb_logs/",
     ):
         """
         Initialize the chess RL agent with PPO
         """
         self.expert = expert_model
 
+        # Make sure the log directory exists
+        import os
+
+        os.makedirs(tensorboard_log, exist_ok=True)
+
         # Create a custom gym environment wrapping our ChessEnv
         self.env = ChessPPOEnv(self.expert)
 
         # Create the PPO model with our hierarchical custom policy
         self.model = PPO(
-            HierarchicalChessPolicy,  # Use our hierarchical policy
+            HierarchicalChessPolicy,
             self.env,
             gamma=gamma,
             n_steps=n_steps,
@@ -206,6 +231,7 @@ class ChessRLAgent:
             clip_range=clip_range,
             device=device,
             verbose=1,
+            tensorboard_log=tensorboard_log,
         )
 
     def get_action(self, board):
@@ -243,8 +269,26 @@ class ChessRLAgent:
         return selected_move
 
     def train(self, total_timesteps=10000):
-        """Train the PPO model"""
-        self.model.learn(total_timesteps=total_timesteps)
+        """Train the PPO model with logging"""
+        # Create checkpoint callback
+        checkpoint_callback = CheckpointCallback(
+            save_freq=1000,  # Save more frequently
+            save_path="./chess_model_checkpoints/",
+            name_prefix="chess_model",
+        )
+
+        # For more frequent logging
+        frequent_logging = FrequentLoggingCallback(log_freq=100)
+
+        # Combine callbacks
+        callbacks = CallbackList([checkpoint_callback, frequent_logging])
+
+        # Train with callbacks
+        self.model.learn(
+            total_timesteps=total_timesteps,
+            callback=callbacks,
+            tb_log_name="chess_run",  # Explicit TB log name
+        )
 
     def save(self, filepath):
         """Save the model to a file"""
