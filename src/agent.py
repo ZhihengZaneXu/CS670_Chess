@@ -22,7 +22,7 @@ class ChessFeatureExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space, features_dim=256):
         super(ChessFeatureExtractor, self).__init__(observation_space, features_dim)
 
-        # Shared feature extractor (using the same architecture as your original model)
+        # Shared feature extractor
         self.shared_layers = nn.Sequential(
             nn.Conv2d(12, 64, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -38,67 +38,134 @@ class ChessFeatureExtractor(BaseFeaturesExtractor):
         return self.shared_layers(observations)
 
 
-class ChessPolicy(ActorCriticPolicy):
+class HierarchicalChessPolicy(ActorCriticPolicy):
     """Custom policy for hierarchical chess actions"""
 
     def __init__(self, observation_space, action_space, lr_schedule, *args, **kwargs):
-        super(ChessPolicy, self).__init__(
+        # Make sure we pass the right feature extractor settings
+        kwargs.update(
+            {
+                "features_extractor_class": ChessFeatureExtractor,
+                "features_extractor_kwargs": dict(features_dim=256),
+            }
+        )
+
+        super(HierarchicalChessPolicy, self).__init__(
             observation_space,
             action_space,
             lr_schedule,
             *args,
             **kwargs,
-            features_extractor_class=ChessFeatureExtractor,
-            features_extractor_kwargs=dict(features_dim=256),
         )
 
         # Piece selection head (actor)
         self.piece_action_net = nn.Linear(self.features_dim, 64)
 
-        # Move direction head (actor)
-        self.move_action_net = nn.Linear(self.features_dim, 64)
+        # Move direction head that takes both features and piece selection
+        # 256 (features) + 64 (one-hot piece) = 320 input dimensions
+        self.piece_embedding = nn.Embedding(64, 64)  # Embed piece selection
+        self.move_action_net = nn.Linear(self.features_dim + 64, 64)
 
-        # Value network
+        # Value network - keep as is
         self.value_net = nn.Linear(self.features_dim, 1)
 
     def forward(self, obs, deterministic=False):
         """Forward pass in network"""
         features = self.extract_features(obs)
 
-        # Get piece logits and move logits
+        # Get piece logits - remains unchanged
         piece_logits = self.piece_action_net(features)
-        move_logits = self.move_action_net(features)
-
-        # Get value estimate
-        values = self.value_net(features)
-
-        # We'll treat the first 64 values of the action space as piece selection
-        # and the next 64 as move selection
         piece_distribution = Categorical(logits=piece_logits)
-        move_distribution = Categorical(logits=move_logits)
 
         if deterministic:
             piece_actions = torch.argmax(piece_logits, dim=1)
-            move_actions = torch.argmax(move_logits, dim=1)
         else:
             piece_actions = piece_distribution.sample()
+
+        # Get piece embedding
+        piece_embed = self.piece_embedding(piece_actions)
+
+        # Concatenate features with piece embedding for hierarchical structure
+        combined_features = torch.cat([features, piece_embed], dim=1)
+
+        # Get move logits based on combined features
+        move_logits = self.move_action_net(combined_features)
+        move_distribution = Categorical(logits=move_logits)
+
+        if deterministic:
+            move_actions = torch.argmax(move_logits, dim=1)
+        else:
             move_actions = move_distribution.sample()
 
-        # Combine into a single action
-        # We're using a 128-dimensional action space (64 for piece + 64 for move)
+        # Combine actions
         actions = torch.cat(
             [piece_actions.unsqueeze(1), move_actions.unsqueeze(1)], dim=1
         )
 
-        log_probs = torch.cat(
-            [
-                piece_distribution.log_prob(piece_actions).unsqueeze(1),
-                move_distribution.log_prob(move_actions).unsqueeze(1),
-            ],
-            dim=1,
+        # Calculate log probabilities
+        log_prob_piece = piece_distribution.log_prob(piece_actions)
+        log_prob_move = move_distribution.log_prob(move_actions)
+        combined_log_prob = log_prob_piece + log_prob_move
+
+        # Get value estimate - directly from features
+        values = self.value_net(features)
+
+        return actions, values, combined_log_prob.unsqueeze(1)
+
+    def evaluate_actions(self, obs, actions):
+        """
+        Evaluate actions according to the current policy,
+        for the PPO loss function.
+
+        :param obs: (torch.Tensor) The observation
+        :param actions: (torch.Tensor) The actions
+        :return: (torch.Tensor, torch.Tensor, torch.Tensor) estimated value, log likelihood of taking those actions
+            and entropy of the action distribution.
+        """
+        features = self.extract_features(obs)
+
+        # Split actions into piece and move
+        piece_actions = actions[:, 0].long()
+        move_actions = actions[:, 1].long()
+
+        # Get piece logits and distribution
+        piece_logits = self.piece_action_net(features)
+        piece_distribution = Categorical(logits=piece_logits)
+
+        # Get piece embedding
+        piece_embed = self.piece_embedding(piece_actions)
+
+        # Concatenate features with piece embedding
+        combined_features = torch.cat([features, piece_embed], dim=1)
+
+        # Get move logits and distribution
+        move_logits = self.move_action_net(combined_features)
+        move_distribution = Categorical(logits=move_logits)
+
+        # Calculate log probabilities
+        log_prob_piece = piece_distribution.log_prob(piece_actions)
+        log_prob_move = move_distribution.log_prob(move_actions)
+        combined_log_prob = log_prob_piece + log_prob_move
+
+        # Calculate entropy (optional, for exploration)
+        entropy = (
+            piece_distribution.entropy().mean() + move_distribution.entropy().mean()
         )
 
-        return actions, values, log_probs
+        # Get value estimate
+        values = self.value_net(features)
+
+        return values, combined_log_prob, entropy
+
+    def predict_values(self, obs):
+        """
+        Get the estimated values according to the current policy.
+
+        :param obs: (torch.Tensor) The observation
+        :return: (torch.Tensor) The estimated values.
+        """
+        features = self.extract_features(obs)
+        return self.value_net(features)
 
 
 class ChessRLAgent:
@@ -118,28 +185,15 @@ class ChessRLAgent:
     ):
         """
         Initialize the chess RL agent with PPO
-
-        Args:
-            expert_model: Expert model (mentor) to imitate
-            gamma: Discount factor
-            n_steps: Number of steps to run for each environment per update
-            batch_size: Minibatch size
-            learning_rate: Learning rate
-            ent_coef: Entropy coefficient
-            vf_coef: Value function coefficient
-            max_grad_norm: Maximum norm for gradient clipping
-            gae_lambda: Factor for trade-off of bias vs variance for GAE
-            clip_range: Clipping parameter for PPO
-            device: Device to run the model on
         """
         self.expert = expert_model
 
         # Create a custom gym environment wrapping our ChessEnv
         self.env = ChessPPOEnv(self.expert)
 
-        # Create the PPO model with our custom policy
+        # Create the PPO model with our hierarchical custom policy
         self.model = PPO(
-            ChessPolicy,
+            HierarchicalChessPolicy,  # Use our hierarchical policy
             self.env,
             gamma=gamma,
             n_steps=n_steps,
