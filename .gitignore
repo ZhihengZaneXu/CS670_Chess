@@ -6,3 +6,4 @@ trained_models/*
 *.pyc
 chess_model_checkpoints/
 chess_tb_logs/
+src/trained_models/

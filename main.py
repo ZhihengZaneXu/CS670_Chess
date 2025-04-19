@@ -1,67 +1,116 @@
 """Main module for Chess RL Agent training and evaluation."""
 
+import argparse
 import os
 
-import chess
-import torch
-
-from src.agent import ChessRLAgent
-from src.config import get_args_parser
-from src.environment import ChessEnv
+from src.environment import create_environment
 from src.expert import ChessExpert
-from src.utils import move_to_direction_idx
+from src.network import create_chess_agent
 
 
-def train(args):
-    """Train the RL agent"""
-    # Create trained output directory if it doesn't exist
-    os.makedirs(args.trained_output_dir, exist_ok=True)
+def get_args_parser():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Chess RL Agent")
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
-    # Initialize expert
-    expert = ChessExpert(args.stockfish_path)
-
-    # Initialize RL agent
-    agent = ChessRLAgent(
-        expert,
-        gamma=args.gamma,
-        learning_rate=args.learning_rate,
+    # Train command
+    train_parser = subparsers.add_parser("train", help="Train the agent")
+    train_parser.add_argument(
+        "--stockfish_path", type=str, default=None, help="Path to Stockfish executable"
+    )
+    train_parser.add_argument(
+        "--episodes", type=int, default=1000, help="Number of training episodes"
+    )
+    train_parser.add_argument(
+        "--max_steps", type=int, default=100, help="Maximum steps per episode"
+    )
+    train_parser.add_argument(
+        "--gamma", type=float, default=0.99, help="Discount factor"
+    )
+    train_parser.add_argument(
+        "--learning_rate", type=float, default=0.0003, help="Learning rate"
+    )
+    train_parser.add_argument(
+        "--eval_interval", type=int, default=10, help="Episodes between evaluations"
+    )
+    train_parser.add_argument(
+        "--save_interval",
+        type=int,
+        default=100,
+        help="Episodes between saving checkpoints",
+    )
+    train_parser.add_argument(
+        "--tensorboard_log",
+        type=str,
+        default="./logs/",
+        help="Directory for TensorBoard logs",
+    )
+    train_parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./trained_models/",
+        help="Directory for saving models",
+    )
+    train_parser.add_argument(
+        "--load_pretrained", type=str, default=None, help="Path to pretrained model"
     )
 
-    # Load existing pretrained model if specified
-    if args.load_pretrained:
-        print(f"Loading pretrained model from {args.load_pretrained}")
-        agent.load(args.load_pretrained)
+    # Evaluate command
+    eval_parser = subparsers.add_parser("evaluate", help="Evaluate the agent")
+    eval_parser.add_argument(
+        "--load_model", type=str, required=True, help="Path to trained model"
+    )
+    eval_parser.add_argument(
+        "--eval_games", type=int, default=10, help="Number of games to evaluate"
+    )
+    eval_parser.add_argument(
+        "--max_steps", type=int, default=100, help="Maximum steps per game"
+    )
+    eval_parser.add_argument("--render", action="store_true", help="Render chess board")
+    eval_parser.add_argument(
+        "--stockfish_path",
+        type=str,
+        default=None,
+        help="Path to Stockfish executable (for comparison)",
+    )
+    eval_parser.add_argument(
+        "--compare_expert", action="store_true", help="Compare with expert"
+    )
 
-    # Train the agent
-    total_timesteps = args.episodes * args.max_steps
-    print(f"Training for {total_timesteps} total timesteps...")
-    agent.train(total_timesteps=total_timesteps)
+    return parser
 
-    # Save final model
-    final_path = os.path.join(args.trained_output_dir, "chess_final_model")
-    agent.save(final_path)
-    print(f"Final model saved to {final_path}")
 
-    # Close expert engine
-    expert.close()
+def main():
+    """Main entry point for the application."""
+    parser = get_args_parser()
+    args = parser.parse_args()
+
+    if args.command == "train":
+        # Import the training module here to avoid circular imports
+        from src.train import train_chess_model
+
+        train_chess_model(args)
+
+    elif args.command == "evaluate":
+        evaluate(args)
+
+    else:
+        parser.print_help()
 
 
 def evaluate(args):
-    """Evaluate the trained RL agent"""
+    """Evaluate the trained RL agent."""
     # Initialize environment
-    env = ChessEnv()
+    env = create_environment(use_expert=False, include_masks=True)
 
     # Initialize expert for comparison (optional)
     expert = None
     if args.compare_expert:
         expert = ChessExpert(args.stockfish_path)
 
-    # Initialize agent
-    agent = ChessRLAgent(expert=None)  # No expert needed for evaluation
-
-    # Load model
-    agent.load(args.load_model)
-    agent.epsilon = 0.0  # No exploration during evaluation
+    # Load the trained agent
+    agent = create_chess_agent(env, expert_model=None)
+    agent = agent.load(args.load_model, env=env)
 
     # Run evaluation games
     wins, draws, losses = 0, 0, 0
@@ -72,8 +121,8 @@ def evaluate(args):
         step_count = 0
 
         while not done and step_count < args.max_steps:
-            # Get agent's move
-            action = agent.get_action(state)
+            # Get agent's action (deterministic for evaluation)
+            action, _ = agent.predict(state, deterministic=True)
 
             # Take step in environment
             next_state, _, done, info = env.step(action)
@@ -106,19 +155,6 @@ def evaluate(args):
     # Close expert if used
     if expert:
         expert.close()
-
-
-def main():
-    """Main entry point for the application."""
-    parser = get_args_parser()
-    args = parser.parse_args()
-
-    if args.command == "train":
-        train(args)
-    elif args.command == "evaluate":
-        evaluate(args)
-    else:
-        parser.print_help()
 
 
 if __name__ == "__main__":

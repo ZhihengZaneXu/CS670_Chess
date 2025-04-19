@@ -3,10 +3,9 @@ import unittest
 import chess
 import torch
 
-from src.agent import ChessRLAgent
 from src.environment import ChessEnv
 from src.expert import ChessExpert
-from src.network import ChessNetwork
+from src.network import ChessNetwork, ChessRLAgent
 from src.utils import board_to_tensor, move_to_direction_idx, selections_to_move
 
 

@@ -1,9 +1,11 @@
+import random
+
 import chess
 import gym
 import numpy as np
 from gym import spaces
 
-from .utils import board_to_tensor
+from utils import board_to_tensor, selections_to_move
 
 
 class ChessEnv:
@@ -36,7 +38,7 @@ class ChessEnv:
         # Check if game is over
         done = self.board.is_game_over()
 
-        # Simple reward structure (will be overridden by the agent's reward function)
+        # Simple reward structure (can be enhanced later)
         reward = 0.0
 
         # Check game result if done
@@ -62,46 +64,94 @@ class ChessEnv:
 
 class ChessPPOEnv(gym.Env):
     """
-    Custom gym environment wrapper for chess that works with Stable Baselines3 PPO
+    Gym environment wrapper for chess that works with Stable Baselines3 PPO
+    and includes action masking
     """
 
     metadata = {"render.modes": ["human"]}
 
-    def __init__(self, expert_model=None, opponent=None):
+    def __init__(
+        self, expert_model=None, opponent=None, include_masks=True, max_moves=200
+    ):
         super(ChessPPOEnv, self).__init__()
 
         # Initialize the chess environment
         self.chess_env = ChessEnv()
         self.expert_model = expert_model
-        self.opponent = opponent  # Optional opponent for self-play
 
-        # Define action and observation spaces required by gym
-        # Action space: 64 squares for piece selection + 64 directions for move selection
+        self.include_masks = (
+            include_masks  # Whether to include action masks in observation
+        )
+        self.max_moves = max_moves  # Maximum moves before declaring a draw
+
+        # Define action space: 64 squares for piece selection + 64 possible moves
         self.action_space = spaces.MultiDiscrete([64, 64])
 
-        # Observation space: 12 channels (6 piece types × 2 colors) × 8×8 board
-        self.observation_space = spaces.Box(
-            low=0, high=1, shape=(12, 8, 8), dtype=np.float32
-        )
+        # Define observation space based on whether we include masks
+        if self.include_masks:
+            self.observation_space = spaces.Dict(
+                {
+                    "board": spaces.Box(
+                        low=0, high=1, shape=(12, 8, 8), dtype=np.float32
+                    ),
+                    "piece_mask": spaces.Box(
+                        low=0, high=1, shape=(64,), dtype=np.float32
+                    ),
+                    "move_mask": spaces.Box(
+                        low=0, high=1, shape=(64, 64), dtype=np.float32
+                    ),
+                }
+            )
+        else:
+            # Simple observation space: just the board
+            self.observation_space = spaces.Box(
+                low=0, high=1, shape=(12, 8, 8), dtype=np.float32
+            )
 
         self.current_board = None
         self.move_count = 0
-        self.max_moves = 100  # Maximum moves before declaring a draw
 
     def reset(self):
-        """
-        Reset the environment to the starting position
-
-        Returns:
-            numpy.ndarray: The initial observation
-        """
+        """Reset the environment to the starting position"""
         self.current_board = self.chess_env.reset()
         self.move_count = 0
         return self._get_observation()
 
     def _get_observation(self):
         """Convert chess board to the format expected by the policy network"""
-        return board_to_tensor(self.current_board).numpy()
+        board_tensor = board_to_tensor(self.current_board).numpy()
+
+        if not self.include_masks:
+            return board_tensor
+
+        # If including masks, create both piece and move masks
+        valid_moves = list(self.current_board.legal_moves)
+
+        # Create piece mask
+        piece_mask = np.zeros(64, dtype=np.float32)
+
+        # Group moves by source square
+        moves_by_source = {}
+        for move in valid_moves:
+            source = move.from_square
+            if source not in moves_by_source:
+                moves_by_source[source] = []
+            moves_by_source[source].append(move)
+
+        # Fill in piece mask
+        for source in moves_by_source:
+            piece_mask[source] = 1.0
+
+        # Create move mask for each piece
+        move_mask = np.zeros((64, 64), dtype=np.float32)
+
+        for source, moves in moves_by_source.items():
+            # For each legal source square, mark valid target directions
+            for i, move in enumerate(moves):
+                if i < 64:  # Limit to 64 moves per piece
+                    move_mask[source, i] = 1.0
+
+        return {"board": board_tensor, "piece_mask": piece_mask, "move_mask": move_mask}
 
     def step(self, action):
         """
@@ -113,8 +163,6 @@ class ChessPPOEnv(gym.Env):
         Returns:
             tuple: (observation, reward, done, info)
         """
-        from .utils import selections_to_move
-
         piece_selection, move_selection = action
 
         # Convert to a chess move
@@ -123,20 +171,13 @@ class ChessPPOEnv(gym.Env):
 
         # If we couldn't find a valid move, choose randomly
         if chess_move is None and valid_moves:
-            import random
-
             chess_move = random.choice(valid_moves)
 
         # Execute move in the chess environment
-        next_board, _, done, info = self.chess_env.step(chess_move)
+        next_board, env_reward, done, info = self.chess_env.step(chess_move)
 
-        # Get expert's move for reward calculation
-        expert_move = None
-        if self.expert_model:
-            expert_move = self.expert_model.get_best_move(self.current_board)
-
-        # Calculate reward based on expert imitation
-        reward = self._calculate_reward(self.current_board, chess_move, expert_move)
+        # Calculate reward (can use expert model if provided)
+        reward = self._calculate_reward(next_board, chess_move)
 
         # Update state
         self.current_board = next_board
@@ -148,41 +189,34 @@ class ChessPPOEnv(gym.Env):
             info["result"] = "1/2-1/2"
             info["reason"] = "move_limit"
 
-        # If playing against an opponent and game not over, let opponent make a move
-        if not done and self.opponent:
-            opponent_move = self.opponent.get_action(self.current_board)
-            self.current_board, _, done, opp_info = self.chess_env.step(opponent_move)
-            self.move_count += 1
-
-            # Update info with opponent results if game ended
-            if done:
-                info.update(opp_info)
-
-            # Adjust reward based on opponent's move outcome
-            if done:
-                result = info.get("result", "1/2-1/2")
-                if result == "1-0" and self.current_board.turn == chess.BLACK:
-                    reward += 1.0  # We won
-                elif result == "0-1" and self.current_board.turn == chess.WHITE:
-                    reward += 1.0  # We won
-                elif result == "1/2-1/2":
-                    reward += 0.5  # Draw is okay
-                else:
-                    reward -= 1.0  # We lost
+        if done:
+            result = info.get("result", "1/2-1/2")
+            if result == "1-0" and self.current_board.turn == chess.BLACK:
+                # Current player (agent) won
+                reward += 1.0
+            elif result == "0-1" and self.current_board.turn == chess.WHITE:
+                # Current player (agent) won
+                reward += 1.0
+            elif result == "1/2-1/2":
+                # Draw
+                reward += 0.5
+            else:
+                # Current player lost (shouldn't happen in single-player mode,
+                # but included for completeness)
+                reward -= 1.0
 
         # Get observation for next state
         observation = self._get_observation()
 
         return observation, reward, done, info
 
-    def _calculate_reward(self, board, action, expert_action):
+    def _calculate_reward(self, board, action):
         """
-        Calculate reward based on similarity to expert action and game outcome
+        Calculate reward for the current state and action
 
         Args:
-            board: Current board state
-            action: Agent's selected action
-            expert_action: Expert's selected action
+            board: Current board state after the action
+            action: The chess move that was executed
 
         Returns:
             float: Reward value
@@ -190,53 +224,63 @@ class ChessPPOEnv(gym.Env):
         # Start with a small negative reward (encourage shorter games)
         reward = -0.01
 
-        # If no expert or invalid moves, just return the small negative reward
-        if action is None or expert_action is None:
-            return reward
+        # If we have an expert model, use it for imitation learning
+        if self.expert_model:
+            expert_move = self.expert_model.get_best_move(board)
 
-        # Reward for matching expert move
-        if action == expert_action:
-            reward += 1.0  # Perfect match
-        else:
-            # Partial reward for similar moves
-            from_square_match = action.from_square == expert_action.from_square
-            to_square_match = action.to_square == expert_action.to_square
+            # Expert-based reward
+            if action == expert_move:
+                reward += 1.0  # Perfect match
+            elif expert_move:
+                # Partial reward for similar moves
+                from_square_match = action.from_square == expert_move.from_square
+                to_square_match = action.to_square == expert_move.to_square
 
-            if from_square_match:
-                reward += 0.5  # Selected the same piece
-            elif to_square_match:
-                reward += 0.3  # Moved to the same square
-            else:
-                # Check if the piece type is the same
-                piece_at_action = board.piece_at(action.from_square)
-                piece_at_expert = board.piece_at(expert_action.from_square)
-
-                if (
-                    piece_at_action
-                    and piece_at_expert
-                    and piece_at_action.piece_type == piece_at_expert.piece_type
-                ):
-                    reward += 0.1  # At least moved the same type of piece
+                if from_square_match:
+                    reward += 0.5  # Selected the same piece
+                elif to_square_match:
+                    reward += 0.3  # Moved to the same square
                 else:
-                    reward -= 0.1  # Different move
+                    # Check if the piece type is the same
+                    piece_at_action = board.piece_at(action.from_square)
+                    piece_at_expert = board.piece_at(expert_move.from_square)
+
+                    if (
+                        piece_at_action
+                        and piece_at_expert
+                        and piece_at_action.piece_type == piece_at_expert.piece_type
+                    ):
+                        reward += 0.1  # At least moved the same type of piece
+                    else:
+                        reward -= 0.1  # Different move
 
         return reward
 
     def render(self, mode="human"):
-        """
-        Render the current board state
-
-        Args:
-            mode: The mode to render with
-
-        Returns:
-            str: The rendered board state
-        """
+        """Render the current board state"""
         if mode == "human":
             return self.chess_env.render()
-        else:
-            return self.chess_env.render()
+        return self.chess_env.render()
 
     def close(self):
         """Clean up resources"""
         pass
+
+
+def create_environment(use_expert=True, include_masks=True):
+    """Create a chess environment with optional expert model"""
+
+    expert_model = None
+    if use_expert:
+        try:
+            from expert import ChessExpert
+
+            expert_model = ChessExpert()
+        except (ImportError, Exception) as e:
+            print(f"Could not initialize expert model: {e}")
+            print("Training without expert guidance")
+
+    # Create the environment
+    env = ChessPPOEnv(expert_model=expert_model, include_masks=include_masks)
+
+    return env

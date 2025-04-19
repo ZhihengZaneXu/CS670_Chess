@@ -1,34 +1,8 @@
-import chess
-import torch
+import os
+import random
 
-
-def board_to_tensor(board):
-    """
-    Convert a chess.Board to a tensor representation.
-
-    Returns:
-        torch.Tensor: Shape (12, 8, 8) representing the board state
-    """
-    pieces = [
-        chess.PAWN,
-        chess.KNIGHT,
-        chess.BISHOP,
-        chess.ROOK,
-        chess.QUEEN,
-        chess.KING,
-    ]
-    colors = [chess.WHITE, chess.BLACK]
-
-    tensor = torch.zeros(12, 8, 8)
-
-    for color_idx, color in enumerate(colors):
-        for piece_idx, piece in enumerate(pieces):
-            channel_idx = piece_idx + 6 * color_idx
-            for square in chess.SquareSet(board.pieces(piece, color)):
-                row, col = divmod(square, 8)
-                tensor[channel_idx, row, col] = 1.0
-
-    return tensor
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 
 
 def move_to_direction_idx(move):
@@ -105,71 +79,145 @@ def move_to_direction_idx(move):
     return None
 
 
-def selections_to_move(piece_selection, direction_selection, valid_moves):
-    """
-    Convert piece selection and direction selection to a chess.Move
-    """
-    import random
+# Utility functions for converting between chess moves and network actions
+def board_to_tensor(board):
+    """Convert a chess.Board to a 12×8×8 tensor representation"""
+    import chess
+    import torch
 
-    if direction_selection >= 56:  # Knight move
-        from_square = piece_selection
+    # Initialize tensor
+    tensor = torch.zeros(12, 8, 8)
 
-        # Knight moves encoding
-        knight_offsets = [
-            (2, 1),
-            (2, -1),
-            (-2, 1),
-            (-2, -1),
-            (1, 2),
-            (1, -2),
-            (-1, 2),
-            (-1, -2),
-        ]
+    # Map each piece to the corresponding channel
+    piece_to_channel = {
+        chess.PAWN: 0,
+        chess.KNIGHT: 1,
+        chess.BISHOP: 2,
+        chess.ROOK: 3,
+        chess.QUEEN: 4,
+        chess.KING: 5,
+    }
 
-        offset_idx = direction_selection - 56
-        dr, dc = knight_offsets[offset_idx]
+    # Fill tensor with pieces
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece is not None:
+            rank, file = divmod(square, 8)
+            channel = piece_to_channel[piece.piece_type]
+            if not piece.color:  # Black pieces go in channels 6-11
+                channel += 6
+            tensor[channel, 7 - rank, file] = 1.0
 
-        from_row, from_col = divmod(from_square, 8)
-        to_row = from_row + dr
-        to_col = from_col + dc
+    return tensor
 
-        if 0 <= to_row < 8 and 0 <= to_col < 8:
-            to_square = to_row * 8 + to_col
 
-            # Find matching move in valid_moves
-            for move in valid_moves:
-                if move.from_square == from_square and move.to_square == to_square:
-                    return move
-    else:
-        # Regular directional move
-        dir_idx = direction_selection // 7
-        distance = (direction_selection % 7) + 1
+def selections_to_move(piece_selection, move_selection, valid_moves):
+    """Convert piece and move selections to a chess.Move"""
+    import chess
 
-        directions = [
-            (1, 0),  # N
-            (1, 1),  # NE
-            (0, 1),  # E
-            (-1, 1),  # SE
-            (-1, 0),  # S
-            (-1, -1),  # SW
-            (0, -1),  # W
-            (1, -1),  # NW
-        ]
+    # Group valid moves by source square
+    moves_by_source = {}
+    for move in valid_moves:
+        source = move.from_square
+        if source not in moves_by_source:
+            moves_by_source[source] = []
+        moves_by_source[source].append(move)
 
-        dr, dc = directions[dir_idx]
-        from_square = piece_selection
-        from_row, from_col = divmod(from_square, 8)
+    # If piece selection is valid and has legal moves
+    if piece_selection in moves_by_source:
+        possible_moves = moves_by_source[piece_selection]
 
-        to_row = from_row + dr * distance
-        to_col = from_col + dc * distance
+        # If we have exactly one move, return it
+        if len(possible_moves) == 1:
+            return possible_moves[0]
 
-        if 0 <= to_row < 8 and 0 <= to_col < 8:
-            to_square = to_row * 8 + to_col
+        # Try to match the move_selection to a direction
+        # Simplified version: just use the index if in range
+        if move_selection < len(possible_moves):
+            return possible_moves[move_selection]
+        else:
+            # Fallback to a random valid move for this piece
+            return random.choice(possible_moves)
 
-            # Find matching move in valid_moves
-            for move in valid_moves:
-                if move.from_square == from_square and move.to_square == to_square:
-                    return move
+    # Fallback if piece selection is not valid
+    return None
 
-    # If no move matches, return a random valid move
-    return random.choice(list(valid_moves)) if valid_moves else None
+
+def create_chess_agent(
+    env,
+    expert_model=None,
+    gamma=0.99,
+    n_steps=512,
+    batch_size=64,
+    learning_rate=0.0003,
+    ent_coef=0.01,
+    vf_coef=0.5,
+    max_grad_norm=0.5,
+    tensorboard_log="./chess_tb_logs/",
+    device="auto",
+):
+    """Create and return a PPO agent for chess"""
+    os.makedirs(tensorboard_log, exist_ok=True)
+
+    # Import within function to avoid circular imports
+    from network import HierarchicalChessPolicy
+
+    # Create the PPO model with our hierarchical policy
+    model = PPO(
+        HierarchicalChessPolicy,
+        env,
+        gamma=gamma,
+        n_steps=n_steps,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        ent_coef=ent_coef,
+        vf_coef=vf_coef,
+        max_grad_norm=max_grad_norm,
+        device=device,
+        verbose=1,
+        tensorboard_log=tensorboard_log,
+    )
+
+    return model
+
+
+def train_chess_agent(
+    model, total_timesteps=10000, save_path="./chess_model_checkpoints/"
+):
+    """Train the PPO model with logging and checkpointing"""
+    os.makedirs(save_path, exist_ok=True)
+
+    # Import within function to avoid circular imports
+    from network import FrequentLoggingCallback
+
+    # Create checkpoint callback
+    checkpoint_callback = CheckpointCallback(
+        save_freq=1000, save_path=save_path, name_prefix="chess_model"
+    )
+
+    # For more frequent logging
+    frequent_logging = FrequentLoggingCallback(log_freq=10)
+
+    # Combine callbacks
+    callbacks = [checkpoint_callback, frequent_logging]
+
+    # Train with callbacks
+    model.learn(
+        total_timesteps=total_timesteps, callback=callbacks, tb_log_name="chess_run"
+    )
+
+    return model
+
+
+# Callback for frequent logging to TensorBoard
+class FrequentLoggingCallback(BaseCallback):
+    """Callback for logging metrics more frequently"""
+
+    def __init__(self, verbose=0, log_freq=100):
+        super(FrequentLoggingCallback, self).__init__(verbose)
+        self.log_freq = log_freq
+
+    def _on_step(self):
+        if self.n_calls % self.log_freq == 0:
+            self.logger.dump(self.num_timesteps)
+        return True
