@@ -34,12 +34,12 @@ class CustomMetricsCallback(BaseCallback):
                 result = info["result"]
                 self.total_games += 1
                 if result == "1-0":
-                    if self.training_env.envs[0].agent_color == chess.WHITE:
+                    if self.training_env.envs[0].unwrapped.agent_color == chess.WHITE:
                         self.wins += 1
                     else:
                         self.losses += 1
                 elif result == "0-1":
-                    if self.training_env.envs[0].agent_color == chess.BLACK:
+                    if self.training_env.envs[0].unwrapped.agent_color == chess.BLACK:
                         self.wins += 1
                     else:
                         self.losses += 1
@@ -63,7 +63,7 @@ def main():
     parser.add_argument(
         "--stockfish_path",
         type=str,
-        default="/home/pd468/cs670/project/expert_models/stockfish/stockfish-ubuntu-x86-64-avx2",
+        default="../expert_models/stockfish/stockfish-ubuntu-x86-64-avx2",
         help="Enable expert guidance by specifying Stockfish path",
     )
     parser.add_argument(
@@ -111,7 +111,7 @@ def main():
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     # Create environment and agent
-    agent_color = chess.WHITE if args.agent_color == "white" else chess.BLACK
+    agent_color = chess.WHITE if args.agent_color == chess.WHITE else chess.BLACK
     env = create_environment(
         use_expert=bool(args.stockfish_path),
         include_masks=True,

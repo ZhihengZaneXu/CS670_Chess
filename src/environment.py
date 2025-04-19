@@ -434,7 +434,7 @@ def create_environment(
     use_expert=True,
     include_masks=True,
     stockfish_opponent=None,
-    stockfish_depth=1,
+    stockfish_depth=15,
     agent_color=chess.WHITE,
 ):
     """
@@ -466,7 +466,7 @@ def create_environment(
             from expert import ChessExpert
 
             # Use a very low skill level and depth for faster training
-            stockfish_opponent = ChessExpert(skill_level=1, depth=1)
+            stockfish_opponent = ChessExpert(skill_level=20, depth=15)
             print(f"Created Stockfish opponent with depth {stockfish_depth}")
         except (ImportError, Exception) as e:
             print(f"Could not initialize Stockfish opponent: {e}")
