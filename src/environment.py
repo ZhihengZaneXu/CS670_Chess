@@ -181,9 +181,7 @@ class ChessPPOStockfishEnv(gym.Env):
 
         try:
             # Get move from Stockfish with the specified depth
-            stockfish_move = self.stockfish_opponent.get_best_move(
-                self.current_board, time_limit=0.1  # Low time limit for faster training
-            )
+            stockfish_move = self.stockfish_opponent.get_best_move(self.current_board)
 
             if stockfish_move is None:
                 # If Stockfish returns None, choose a random move
@@ -195,6 +193,7 @@ class ChessPPOStockfishEnv(gym.Env):
 
             # Execute Stockfish's move
             _, _, done, _ = self.chess_env.step(stockfish_move)
+            self.current_board = self.chess_env.board.copy()
             self.move_count += 1
             self.last_move = stockfish_move
             return not done
@@ -239,6 +238,8 @@ class ChessPPOStockfishEnv(gym.Env):
 
         # Execute the agent's move
         next_board, env_reward, done, info = self.chess_env.step(chess_move)
+        self.current_board = next_board
+
         self.last_move = chess_move
         self.move_count += 1
 
@@ -335,11 +336,11 @@ class ChessPPOStockfishEnv(gym.Env):
         if captured_piece:
             # Reward based on piece value
             piece_values = {
-                chess.PAWN: 1.0,
-                chess.KNIGHT: 3.0,
-                chess.BISHOP: 3.0,
-                chess.ROOK: 5.0,
-                chess.QUEEN: 9.0,
+                chess.PAWN: 0.5,
+                chess.KNIGHT: 0.7,
+                chess.BISHOP: 0.7,
+                chess.ROOK: 0.9,
+                chess.QUEEN: 1.1,
             }
             reward += piece_values.get(captured_piece.piece_type, 0.0) * 0.1
 
@@ -367,13 +368,13 @@ class ChessPPOStockfishEnv(gym.Env):
             result = info["result"]
             if result == "1-0" and self.agent_color == chess.WHITE:
                 # Agent won
-                reward += 1.0
+                reward += 3.0
             elif result == "0-1" and self.agent_color == chess.BLACK:
                 # Agent won
                 reward += 1.0
             elif result == "1/2-1/2":
                 # Draw
-                reward += 0.5
+                reward += 0.1
             else:
                 # Agent lost
                 reward -= 1.0
@@ -388,12 +389,11 @@ class ChessPPOStockfishEnv(gym.Env):
             float: Material advantage from the agent's perspective
         """
         piece_values = {
-            chess.PAWN: 1,
-            chess.KNIGHT: 3,
-            chess.BISHOP: 3,
-            chess.ROOK: 5,
-            chess.QUEEN: 9,
-            chess.KING: 0,  # Kings don't contribute to material count
+            chess.PAWN: 0.5,
+            chess.KNIGHT: 0.7,
+            chess.BISHOP: 0.7,
+            chess.ROOK: 0.9,
+            chess.QUEEN: 1.1,
         }
 
         white_material = 0
@@ -466,7 +466,7 @@ def create_environment(
             from expert import ChessExpert
 
             # Use a very low skill level and depth for faster training
-            stockfish_opponent = ChessExpert(skill_level=1, depth=stockfish_depth)
+            stockfish_opponent = ChessExpert(skill_level=1, depth=1)
             print(f"Created Stockfish opponent with depth {stockfish_depth}")
         except (ImportError, Exception) as e:
             print(f"Could not initialize Stockfish opponent: {e}")

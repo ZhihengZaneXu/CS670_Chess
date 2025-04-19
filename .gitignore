@@ -9,3 +9,4 @@ chess_tb_logs/
 src/trained_models/
 src/pretrained_models/
 src/logs/
+trained_models_old/

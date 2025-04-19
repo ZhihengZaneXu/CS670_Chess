@@ -87,7 +87,7 @@ def main():
 
     if args.command == "train":
         # Import the training module here to avoid circular imports
-        from src.train import train_chess_model
+        from train import train_chess_model
 
         train_chess_model(args)
 

@@ -6,7 +6,7 @@ class ChessExpert:
 
     def __init__(
         self,
-        stockfish_path=None,
+        stockfish_path="/home/pd468/cs670/project/expert_models/stockfish/stockfish-ubuntu-x86-64-avx2",
         skill_level=20,
         depth=15,
     ):
