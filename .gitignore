@@ -7,3 +7,5 @@ trained_models/*
 chess_model_checkpoints/
 chess_tb_logs/
 src/trained_models/
+src/pretrained_models/
+src/logs/

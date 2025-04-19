@@ -11,9 +11,10 @@ from collections import deque
 import chess
 import matplotlib.pyplot as plt
 import numpy as np
+from stable_baselines3.common.logger import configure
 from tqdm import tqdm
 
-# To this (assuming the modules are in the same directory):
+# Import modules
 from environment import create_environment
 from expert import ChessExpert
 from utils import create_chess_agent, selections_to_move, train_chess_agent
@@ -30,11 +31,15 @@ class ChessTrainer:
         tensorboard_log="./logs/",
         output_dir=f"./trained_models/{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}/",
         window_size=100,  # For moving averages
+        n_steps=512,  # Reduced from 2048 for faster updates
+        stockfish_depth=1,  # Add this parameter
+        agent_color=chess.WHITE,  # Add this parameter
     ):
         """Initialize the trainer."""
         self.tensorboard_log = tensorboard_log
         self.output_dir = output_dir
         self.window_size = window_size
+        self.n_steps = n_steps
 
         # Create output directories
         os.makedirs(output_dir, exist_ok=True)
@@ -44,19 +49,26 @@ class ChessTrainer:
         # Initialize expert
         self.expert = ChessExpert(stockfish_path) if stockfish_path else None
 
-        # Create environment with action masking
+        # Create environment with action masking and Stockfish opponent
         self.env = create_environment(
-            use_expert=True if self.expert else False, include_masks=True
+            use_expert=True if self.expert else False,
+            include_masks=True,
+            stockfish_depth=stockfish_depth,  # Use the parameter
+            agent_color=agent_color,  # Use the parameter
         )
 
-        # Create agent
+        # Create agent with smaller n_steps for faster updates
         self.agent = create_chess_agent(
             self.env,
             expert_model=self.expert,
             gamma=gamma,
             learning_rate=learning_rate,
             tensorboard_log=tensorboard_log,
+            n_steps=n_steps,
         )
+
+        # Setup TensorBoard logger
+        self._setup_logger()
 
         # Initialize metrics tracking
         self.metrics = {
@@ -90,6 +102,52 @@ class ChessTrainer:
         self.draws = 0
         self.losses = 0
         self.total_games = 0
+
+    def _setup_logger(self):
+        """Set up a separate logger for TensorBoard that doesn't interfere with SB3's logger"""
+        # Configure logger
+        log_path = os.path.join(self.tensorboard_log, "custom_metrics")
+        os.makedirs(log_path, exist_ok=True)
+        self.custom_logger = configure(log_path, ["tensorboard"])
+
+    def _log_to_tensorboard(self, episode, step_count):
+        """Log metrics to TensorBoard"""
+        # Only log if we have metrics
+        if not self.metrics["episode_rewards"]:
+            return
+
+        # Log episode metrics
+        self.custom_logger.record("train/reward", self.metrics["episode_rewards"][-1])
+        self.custom_logger.record(
+            "train/episode_length", self.metrics["episode_lengths"][-1]
+        )
+        self.custom_logger.record(
+            "train/perfect_accuracy", self.metrics["perfect_move_accuracy"][-1]
+        )
+        self.custom_logger.record(
+            "train/piece_accuracy", self.metrics["piece_selection_accuracy"][-1]
+        )
+        self.custom_logger.record(
+            "train/dest_accuracy", self.metrics["destination_accuracy"][-1]
+        )
+
+        # Log running averages
+        self.custom_logger.record("train/avg_reward", self.metrics["avg_rewards"][-1])
+        self.custom_logger.record(
+            "train/avg_episode_length", self.metrics["avg_episode_length"][-1]
+        )
+        self.custom_logger.record(
+            "train/avg_perfect_accuracy", self.metrics["avg_perfect_accuracy"][-1]
+        )
+
+        # Log game outcomes
+        if self.total_games > 0:
+            self.custom_logger.record("train/win_rate", self.wins / self.total_games)
+            self.custom_logger.record("train/draw_rate", self.draws / self.total_games)
+            self.custom_logger.record("train/loss_rate", self.losses / self.total_games)
+
+        # Write to disk - use step_count to maintain proper x-axis in TensorBoard
+        self.custom_logger.dump(step_count)
 
     def load_pretrained(self, model_path):
         """Load a pretrained model."""
@@ -137,16 +195,26 @@ class ChessTrainer:
         # Start timing
         start_time = time.time()
 
-        from utils import FrequentLoggingCallback
+        # Debug observation format
+        print("\nDebug observation format:")
+        obs_sample = self.env.reset()
+        if isinstance(obs_sample, dict):
+            print("Observation is a dictionary with keys:", obs_sample.keys())
+            if "board" in obs_sample:
+                print("Board shape:", obs_sample["board"].shape)
+            if "piece_mask" in obs_sample:
+                print("Piece mask shape:", obs_sample["piece_mask"].shape)
+                print("Number of valid pieces:", obs_sample["piece_mask"].sum())
+            if "move_mask" in obs_sample:
+                print("Move mask shape:", obs_sample["move_mask"].shape)
 
-        frequent_logging = FrequentLoggingCallback(log_freq=10)
-        total_timesteps = total_episodes * max_steps
+        # Track total steps for TensorBoard
+        total_steps = 0
 
-        self.agent.learn(
-            total_timesteps=total_timesteps,
-            callback=frequent_logging,
-            tb_log_name="chess_training",
-        )
+        print("Starting training loop...")
+        print(f"Environment observation space: {self.env.observation_space}")
+        print(f"Environment action space: {self.env.action_space}")
+        print(f"Using n_steps={self.n_steps} for PPO update frequency")
 
         # Main training loop
         for episode in tqdm(range(1, total_episodes + 1)):
@@ -166,6 +234,10 @@ class ChessTrainer:
             while not done and steps < max_steps:
                 # Get action from agent (during training, agent.predict handles exploration)
                 action, _ = self.agent.predict(obs, deterministic=False)
+
+                # Log action for debugging if needed
+                if steps == 0 and episode % 10 == 0:
+                    print(f"Episode {episode}, Step {steps}: Got action {action}")
 
                 # Convert action to chess move
                 piece_selection, move_selection = action
@@ -206,6 +278,11 @@ class ChessTrainer:
                 obs, reward, done, info = self.env.step(action)
                 episode_reward += reward
                 steps += 1
+                total_steps += 1
+
+                # Log to TensorBoard every 10 steps for more frequent updates
+                if total_steps % 10 == 0:
+                    self._log_to_tensorboard(episode, total_steps)
 
             # End of episode
             self.total_games += 1
@@ -265,6 +342,9 @@ class ChessTrainer:
 
             # Store detailed move stats
             self.move_stats.extend(episode_move_stats)
+
+            # Log to TensorBoard at the end of each episode
+            self._log_to_tensorboard(episode, total_steps)
 
             # Print metrics at intervals
             if episode % eval_interval == 0:
@@ -372,6 +452,8 @@ class ChessTrainer:
 
 def train_chess_model(args):
     """Main training function."""
+    agent_color = chess.WHITE if args.agent_color.lower() == "white" else chess.BLACK
+
     # Create trainer
     trainer = ChessTrainer(
         stockfish_path=args.stockfish_path,
@@ -379,6 +461,9 @@ def train_chess_model(args):
         learning_rate=args.learning_rate,
         tensorboard_log=args.tensorboard_log,
         output_dir=args.output_dir,
+        n_steps=args.n_steps if hasattr(args, "n_steps") else 512,
+        stockfish_depth=args.stockfish_depth,
+        agent_color=agent_color,
     )
 
     # Load pretrained model if specified
@@ -438,6 +523,26 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--load_pretrained", type=str, default=None, help="Path to pretrained model"
+    )
+    parser.add_argument(
+        "--n_steps",
+        type=int,
+        default=512,
+        help="Number of steps to collect before updating policy",
+    )
+
+    parser.add_argument(
+        "--stockfish_depth",
+        type=int,
+        default=1,
+        help="Depth for Stockfish search (1-5 recommended for training)",
+    )
+    parser.add_argument(
+        "--agent_color",
+        type=str,
+        default="white",
+        choices=["white", "black"],
+        help="Color for the agent to play as",
     )
 
     args = parser.parse_args()
