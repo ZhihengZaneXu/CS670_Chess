@@ -6,17 +6,8 @@ import numpy as np
 from gym import spaces
 
 import reward_config as cfg
+from expert import ChessExpert, ModelOpponent
 from utils import board_to_tensor, selections_to_move
-
-
-def return_piece_value():
-    return {
-        chess.PAWN: 1,
-        chess.KNIGHT: 1.2,
-        chess.BISHOP: 1.2,
-        chess.ROOK: 2,
-        chess.QUEEN: 3,
-    }
 
 
 class ChessEnv:
@@ -205,7 +196,6 @@ class ChessPPOStockfishEnv(gym.Env):
             # Execute Stockfish's move
             _, _, done, _ = self.chess_env.step(stockfish_move)
             self.current_board = self.chess_env.board.copy()
-            self.move_count += 1
             self.last_move = stockfish_move
             return not done
 
@@ -249,13 +239,20 @@ class ChessPPOStockfishEnv(gym.Env):
 
         # Execute the agent's move
         next_board, env_reward, done, info = self.chess_env.step(chess_move)
-        self.current_board = next_board
+
+        expert_move = self.expert_model.get_best_move(self.current_board)
+        info["expert_move"] = expert_move
 
         self.last_move = chess_move
         self.move_count += 1
 
         # Calculate immediate reward for the agent's move
-        agent_move_reward = self._calculate_reward(next_board, chess_move)
+        agent_move_reward = self._calculate_reward(
+            self.current_board, expert_move, chess_move
+        )
+
+        # Update the current board state
+        self.current_board = next_board
 
         # Check for early game termination
         if self._check_termination(next_board, done, info):
@@ -297,13 +294,13 @@ class ChessPPOStockfishEnv(gym.Env):
 
         return done
 
-    def _calculate_reward(self, board, action):
+    def _calculate_reward(self, board, expert_move, chess_move):
         """
         Calculate immediate reward for the agent's move
 
         Args:
             board: Current board state after the action
-            action: The chess move that was executed
+            chess_move: The chess move that was executed
 
         Returns:
             float: Reward value
@@ -311,38 +308,34 @@ class ChessPPOStockfishEnv(gym.Env):
         # Start with a small negative reward (encourage shorter games)
         reward = cfg.SHORT_GAME_PENALTY
 
-        # If we have an expert model, use it for imitation learning
-        if self.expert_model:
-            expert_move = self.expert_model.get_best_move(board)
+        # Expert-based reward
+        if chess_move == expert_move:
+            reward += cfg.IMIT_PERFECT_MOVE
+        elif expert_move:
+            # Partial reward for similar moves
+            from_square_match = chess_move.from_square == expert_move.from_square
+            to_square_match = chess_move.to_square == expert_move.to_square
 
-            # Expert-based reward
-            if action == expert_move:
-                reward += cfg.IMIT_PERFECT_MOVE
-            elif expert_move:
-                # Partial reward for similar moves
-                from_square_match = action.from_square == expert_move.from_square
-                to_square_match = action.to_square == expert_move.to_square
+            if from_square_match:
+                reward += cfg.IMIT_FROM_MATCH
+            elif to_square_match:
+                reward += cfg.IMIT_TO_MATCH
+            else:
+                # Check if the piece type is the same
+                piece_at_action = board.piece_at(chess_move.from_square)
+                piece_at_expert = board.piece_at(expert_move.from_square)
 
-                if from_square_match:
-                    reward += cfg.IMIT_FROM_MATCH
-                elif to_square_match:
-                    reward += cfg.IMIT_TO_MATCH
+                if (
+                    piece_at_action
+                    and piece_at_expert
+                    and piece_at_action.piece_type == piece_at_expert.piece_type
+                ):
+                    reward += cfg.IMIT_TYPE_MATCH
                 else:
-                    # Check if the piece type is the same
-                    piece_at_action = board.piece_at(action.from_square)
-                    piece_at_expert = board.piece_at(expert_move.from_square)
-
-                    if (
-                        piece_at_action
-                        and piece_at_expert
-                        and piece_at_action.piece_type == piece_at_expert.piece_type
-                    ):
-                        reward += cfg.IMIT_TYPE_MATCH
-                    else:
-                        reward += cfg.IMIT_MISMATCH_PEN
+                    reward += cfg.IMIT_MISMATCH_PEN
 
         # Reward for captures
-        to_square = action.to_square
+        to_square = chess_move.to_square
         captured_piece = board.piece_at(to_square)
         if captured_piece:
             reward += cfg.CAPTURE_SCALE * cfg.PIECE_VALUES.get(
@@ -393,7 +386,7 @@ class ChessPPOStockfishEnv(gym.Env):
         Returns:
             float: Material advantage from the agent's perspective
         """
-        piece_values = return_piece_value()
+        piece_values = cfg.PIECE_VALUES
 
         white_material = 0
         black_material = 0
@@ -452,8 +445,6 @@ def create_environment(
     expert_model = None
     if use_expert:
         try:
-            from expert import ChessExpert
-
             expert_model = ChessExpert()
         except (ImportError, Exception) as e:
             print(f"Could not initialize expert model: {e}")
@@ -462,8 +453,6 @@ def create_environment(
     # Create or use the Stockfish opponent
     if stockfish_opponent is None:
         try:
-            from expert import ChessExpert
-
             # Use a very low skill level and depth for faster training
             stockfish_opponent = ChessExpert(skill_level=20, depth=15)
             print(f"Created Stockfish opponent with depth {stockfish_depth}")

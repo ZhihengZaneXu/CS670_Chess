@@ -1,5 +1,8 @@
 import chess
+import numpy as np
 from stockfish import Stockfish
+
+from utils import board_to_tensor, selections_to_move
 
 
 class ChessExpert:
@@ -70,3 +73,63 @@ class ChessExpert:
         """Close the engine process (not needed with stockfish package)"""
         # The stockfish package handles engine process cleanup automatically
         pass
+
+        from environment import board_to_tensor, selections_to_move
+
+
+class ModelOpponent:
+    def __init__(self, model, include_masks=True):
+        """
+        Wraps a trained SB3 model so it looks like a `ChessExpert`
+
+        Args:
+            model:   a Stable‑Baselines3 agent (with .predict())
+            include_masks: whether to build piece/move masks
+        """
+        self.model = model
+        self.include_masks = include_masks
+
+    def get_best_move(self, board):
+        """
+        Given a python-chess Board, return the move chosen
+        by the wrapped policy in UCI form.
+        """
+        # 1) get raw board tensor
+        board_tensor = board_to_tensor(board).numpy()
+
+        # 2) optionally build masks exactly as in the env
+        if not self.include_masks:
+            obs = board_tensor
+        else:
+            valid_moves = list(board.legal_moves)
+            # group legal moves by source square
+            moves_by_source = {}
+            for mv in valid_moves:
+                moves_by_source.setdefault(mv.from_square, []).append(mv)
+
+            # piece mask: which from‑squares are legal
+            piece_mask = np.zeros(64, dtype=np.float32)
+            for src in moves_by_source:
+                piece_mask[src] = 1.0
+
+            # move mask: for each src, which move‑slots 0–63 are valid
+            move_mask = np.zeros((64, 64), dtype=np.float32)
+            for src, mvs in moves_by_source.items():
+                for i, mv in enumerate(mvs):
+                    if i < 64:
+                        move_mask[src, i] = 1.0
+
+            obs = {
+                "board": board_tensor,
+                "piece_mask": piece_mask,
+                "move_mask": move_mask,
+            }
+
+        # 3) ask the policy for its action (deterministic)
+        action, _ = self.model.predict(obs, deterministic=True)
+
+        # 4) map (piece_sel, move_sel) → chess.Move
+        legal = list(board.legal_moves)
+        chosen_move = selections_to_move(int(action[0]), int(action[1]), legal)
+
+        return chosen_move
