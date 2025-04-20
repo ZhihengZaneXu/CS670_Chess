@@ -3,7 +3,7 @@
 import chess
 
 # ── Terminal outcome weights ───────────────────────────────────────────────
-WIN_REWARD = 3  # reward for agent checkmating opponent
+WIN_REWARD = 2  # reward for agent checkmating opponent
 DRAW_REWARD = 1  # reward for draw
 LOSS_PENALTY = -1.0  # penalty for agent being checkmated
 
