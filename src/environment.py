@@ -435,7 +435,7 @@ def create_environment(
     Args:
         use_expert: Whether to use an expert model for rewards
         include_masks: Whether to include action masks in observation
-        stockfish_opponent: Optional pre-configured Stockfish object
+        stockfish_opponent: Optional pre-configured Stockfish object1
         stockfish_depth: Depth for Stockfish search (if creating a new Stockfish)
         agent_color: Which color the agent plays as (chess.WHITE or chess.BLACK)
 
@@ -454,7 +454,7 @@ def create_environment(
     if stockfish_opponent is None:
         try:
             # Use a very low skill level and depth for faster training
-            stockfish_opponent = ChessExpert(skill_level=20, depth=15)
+            stockfish_opponent = ChessExpert(skill_level=0, depth=1)
             print(f"Created Stockfish opponent with depth {stockfish_depth}")
         except (ImportError, Exception) as e:
             print(f"Could not initialize Stockfish opponent: {e}")

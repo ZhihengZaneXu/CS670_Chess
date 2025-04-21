@@ -9,15 +9,9 @@ class ChessExpert:
 
     def __init__(
         self,
-<<<<<<< HEAD
-        stockfish_path="../expert_models/stockfish/stockfish-ubuntu-x86-64-avx2",
-        skill_level=20,
-        depth=15,
-=======
         stockfish_path="/home/pd468/cs670/project/expert_models/stockfish/stockfish-ubuntu-x86-64-avx2",
         skill_level=0,
         depth=5,
->>>>>>> 1866126abd15b346fb2a4aacedee5749e6bb92bc
     ):
         """
         Initialize the chess expert (mentor) model using Stockfish package

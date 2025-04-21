@@ -1,294 +1,223 @@
-"""
-Visualization module for Chess RL Agent training metrics.
-This module can load saved metrics and generate plots without requiring a display.
-"""
-
-import argparse
-import json
+import glob
 import os
+import re
 
 import matplotlib
 
-# Force matplotlib to use a non-interactive backend that doesn't require a display
-matplotlib.use("Agg")
+matplotlib.use("Agg")  # Use Agg backend for non-interactive environments
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+from scipy.ndimage import gaussian_filter1d
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 
-class ChessMetricsVisualizer:
-    """Class for visualizing training metrics for Chess RL agent."""
+# Function to extract metrics from TensorBoard logs
+def extract_metrics_from_tensorboard(log_dir):
+    """
+    Extract metrics related to move quality from TensorBoard logs.
 
-    def __init__(self, metrics_dir, output_dir=None):
-        """
-        Initialize the visualizer.
+    Parameters:
+    log_dir (str): Path to TensorBoard log directory
 
-        Args:
-            metrics_dir: Directory containing the training metrics JSON files
-            output_dir: Directory to save the generated plots (default: metrics_dir/plots)
-        """
-        self.metrics_dir = metrics_dir
+    Returns:
+    pandas.DataFrame: DataFrame containing extracted metrics
+    """
+    # Find all event files
+    event_files = glob.glob(
+        os.path.join(log_dir, "**", "events.out.tfevents.*"), recursive=True
+    )
 
-        # Set output directory
-        if output_dir is None:
-            self.output_dir = os.path.join(metrics_dir, "plots")
-        else:
-            self.output_dir = output_dir
+    if not event_files:
+        raise FileNotFoundError(f"No TensorBoard event files found in {log_dir}")
 
-        # Create output directory if it doesn't exist
-        os.makedirs(self.output_dir, exist_ok=True)
+    # Metrics to extract
+    metrics = [
+        "quality/perfect_move_rate",
+        "quality/correct_piece_selection_rate",
+        "quality/correct_move_selection_rate",
+    ]
 
-        # Initialize metrics
-        self.metrics = None
-        self.move_stats = None
+    # Initialize empty DataFrame
+    all_data = []
 
-    def load_metrics(self):
-        """Load metrics from JSON files."""
-        # Load main metrics
-        metrics_path = os.path.join(self.metrics_dir, "training_metrics.json")
-        if os.path.exists(metrics_path):
-            with open(metrics_path, "r") as f:
-                self.metrics = json.load(f)
-            print(f"Loaded training metrics from {metrics_path}")
-        else:
-            print(f"Warning: Could not find training metrics at {metrics_path}")
+    # Process each event file
+    for event_file in event_files:
+        print(f"Processing {event_file}")
+        event_acc = EventAccumulator(event_file)
+        event_acc.Reload()
 
-        # Load move stats if available
-        moves_path = os.path.join(self.metrics_dir, "move_stats.json")
-        if os.path.exists(moves_path):
-            with open(moves_path, "r") as f:
-                self.move_stats = json.load(f)
-            print(f"Loaded move statistics from {moves_path}")
-        else:
-            print(f"Note: No move statistics found at {moves_path}")
+        # Check which metrics are available
+        available_metrics = set(event_acc.Tags()["scalars"])
+        metrics_to_extract = [m for m in metrics if m in available_metrics]
 
-        return self.metrics is not None
+        if not metrics_to_extract:
+            print(f"None of the required metrics found in {event_file}")
+            continue
 
-    def generate_plots(self, figsize=(10, 6), dpi=100):
-        """Generate and save plots of training metrics."""
-        if self.metrics is None:
-            print("No metrics loaded. Call load_metrics() first.")
-            return False
+        # Extract metrics
+        for metric in metrics_to_extract:
+            events = event_acc.Scalars(metric)
+            data = {
+                "step": [e.step for e in events],
+                "wall_time": [e.wall_time for e in events],
+                "value": [e.value for e in events],
+                "metric": [metric] * len(events),
+            }
 
-        print(f"Generating plots in {self.output_dir}...")
+            all_data.append(pd.DataFrame(data))
 
-        # Plot rewards
-        plt.figure(figsize=figsize, dpi=dpi)
-        if "episode_rewards" in self.metrics and "avg_rewards" in self.metrics:
-            plt.plot(self.metrics["episode_rewards"], alpha=0.3, label="Episode Reward")
-            plt.plot(self.metrics["avg_rewards"], label="Avg Reward")
-            plt.xlabel("Episode")
-            plt.ylabel("Reward")
-            plt.title("Training Rewards")
-            plt.legend()
-            plt.savefig(os.path.join(self.output_dir, "rewards.png"))
-            plt.close()
-            print("Generated rewards plot")
+    if not all_data:
+        raise ValueError("No relevant metrics found in the TensorBoard logs")
 
-        # Plot episode lengths
-        plt.figure(figsize=figsize, dpi=dpi)
-        if "episode_lengths" in self.metrics and "avg_episode_length" in self.metrics:
-            plt.plot(self.metrics["episode_lengths"], alpha=0.3, label="Episode Length")
-            plt.plot(self.metrics["avg_episode_length"], label="Avg Length")
-            plt.xlabel("Episode")
-            plt.ylabel("Steps")
-            plt.title("Episode Lengths")
-            plt.legend()
-            plt.savefig(os.path.join(self.output_dir, "episode_lengths.png"))
-            plt.close()
-            print("Generated episode lengths plot")
+    # Combine all data
+    combined_df = pd.concat(all_data, ignore_index=True)
 
-        # Plot move accuracies
-        plt.figure(figsize=figsize, dpi=dpi)
-        if all(
-            key in self.metrics
-            for key in [
-                "avg_perfect_accuracy",
-                "avg_piece_accuracy",
-                "avg_dest_accuracy",
-            ]
-        ):
-            plt.plot(self.metrics["avg_perfect_accuracy"], label="Perfect Move")
-            plt.plot(self.metrics["avg_piece_accuracy"], label="Piece Selection")
-            plt.plot(self.metrics["avg_dest_accuracy"], label="Destination")
-            plt.xlabel("Episode")
-            plt.ylabel("Accuracy")
-            plt.title("Move Accuracy")
-            plt.legend()
-            plt.savefig(os.path.join(self.output_dir, "move_accuracy.png"))
-            plt.close()
-            print("Generated move accuracy plot")
+    # Pivot the data for easier plotting
+    pivot_df = combined_df.pivot_table(
+        index=["step", "wall_time"], columns="metric", values="value"
+    ).reset_index()
 
-        # Plot game outcomes
-        plt.figure(figsize=figsize, dpi=dpi)
-        if all(key in self.metrics for key in ["win_rate", "draw_rate", "loss_rate"]):
-            plt.plot(self.metrics["win_rate"], label="Win Rate")
-            plt.plot(self.metrics["draw_rate"], label="Draw Rate")
-            plt.plot(self.metrics["loss_rate"], label="Loss Rate")
-            plt.xlabel("Episode")
-            plt.ylabel("Rate")
-            plt.title("Game Outcomes")
-            plt.legend()
-            plt.savefig(os.path.join(self.output_dir, "game_outcomes.png"))
-            plt.close()
-            print("Generated game outcomes plot")
+    # Rename columns for clarity
+    pivot_df = pivot_df.rename(
+        columns={
+            "quality/perfect_move_rate": "perfect_move_rate",
+            "quality/correct_piece_selection_rate": "correct_piece_selection_rate",
+            "quality/correct_move_selection_rate": "correct_move_selection_rate",
+        }
+    )
 
-        # If win/draw/loss rates are all 0, print a warning
-        if (
-            self.metrics.get("win_rate", [0])[-1] == 0
-            and self.metrics.get("draw_rate", [0])[-1] == 0
-            and self.metrics.get("loss_rate", [0])[-1] == 0
-        ):
-            print("\nWARNING: All game outcome rates (win/draw/loss) are 0.")
-            print(
-                "This could indicate an issue with how game outcomes are being tracked."
+    return pivot_df
+
+
+# Function to create histograms with specified bins
+def visualize_histograms(df, bins=None):
+    """
+    Create histograms for each metric to show distribution.
+
+    Parameters:
+    df (pandas.DataFrame): DataFrame containing the metrics
+    bins (list): Custom bin edges (if None, uses default binning)
+    """
+    metrics = [
+        "perfect_move_rate",
+        "correct_piece_selection_rate",
+        "correct_move_selection_rate",
+    ]
+
+    titles = {
+        "perfect_move_rate": "Perfect Move Rate Distribution",
+        "correct_piece_selection_rate": "Correct Piece Selection Rate Distribution",
+        "correct_move_selection_rate": "Correct Move Selection Rate Distribution",
+    }
+
+    colors = {
+        "perfect_move_rate": "green",
+        "correct_piece_selection_rate": "blue",
+        "correct_move_selection_rate": "orange",
+    }
+
+    # Use custom bins if specified, otherwise use default
+    if bins is None:
+        bins = [0, 0.25, 0.5, 0.8, 0.9, 1.0]
+
+    for metric in metrics:
+        if metric in df.columns:
+            # Drop NaN values for accurate calculations
+            data = df[metric].dropna()
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            # Create histogram
+            n, bin_edges, patches = ax.hist(
+                data, bins=bins, color=colors[metric], alpha=0.7, edgecolor="black"
             )
-            print("Check the code in train.py where results are recorded.\n")
 
-        # Generate additional plots if move stats are available
-        if self.move_stats:
-            self._generate_move_stats_plots(figsize, dpi)
+            # Calculate total count for percentage (using only non-NaN values)
+            total_count = len(data)
 
-        print("All plots generated successfully")
-        return True
+            # Calculate exact percentage (ensure they sum to 100%)
+            percentages = [count / total_count * 100 for count in n]
+            total_pct = sum(percentages)
 
-    def _generate_move_stats_plots(self, figsize, dpi):
-        """Generate additional plots based on move statistics."""
-        # Extract episode numbers and perfect match percentages
-        episodes = []
-        perfect_matches = []
-        piece_matches = []
-        dest_matches = []
+            # Print for debugging
+            print(f"\n{metric} histogram statistics:")
+            print(f"Total count: {total_count}")
+            print(f"Counts per bin: {n}")
+            print(f"Raw percentages: {percentages}")
+            print(f"Total percentage: {total_pct}%")
 
-        # Group by episode
-        episodes_data = {}
-        for move in self.move_stats:
-            ep = move["episode"]
-            if ep not in episodes_data:
-                episodes_data[ep] = {"perfect": 0, "piece": 0, "dest": 0, "total": 0}
+            # Add percentage labels on each bar (correctly summing to 100%)
+            for i in range(len(n)):
+                # Calculate exact percentage
+                pct = 100 * n[i] / total_count
 
-            episodes_data[ep]["total"] += 1
-            if move.get("perfect_match", False):
-                episodes_data[ep]["perfect"] += 1
-            if move.get("piece_match", False):
-                episodes_data[ep]["piece"] += 1
-            if move.get("dest_match", False):
-                episodes_data[ep]["dest"] += 1
-
-        # Convert to percentages per episode
-        for ep in sorted(episodes_data.keys()):
-            if episodes_data[ep]["total"] > 0:
-                episodes.append(ep)
-                perfect_matches.append(
-                    episodes_data[ep]["perfect"] / episodes_data[ep]["total"]
-                )
-                piece_matches.append(
-                    episodes_data[ep]["piece"] / episodes_data[ep]["total"]
-                )
-                dest_matches.append(
-                    episodes_data[ep]["dest"] / episodes_data[ep]["total"]
+                # Position label in the middle of the bar
+                ax.text(
+                    (bin_edges[i] + bin_edges[i + 1]) / 2,
+                    n[i] + (max(n) * 0.02),  # Slight offset for visibility
+                    f"{pct:.1f}%",
+                    ha="center",
+                    fontweight="bold",
                 )
 
-        # Plot move match percentages
-        if episodes:
-            plt.figure(figsize=figsize, dpi=dpi)
-            plt.plot(episodes, perfect_matches, label="Perfect Match")
-            plt.plot(episodes, piece_matches, label="Piece Match")
-            plt.plot(episodes, dest_matches, label="Destination Match")
-            plt.xlabel("Episode")
-            plt.ylabel("Match Percentage")
-            plt.title("Move Match Percentages")
-            plt.legend()
-            plt.savefig(os.path.join(self.output_dir, "move_matches.png"))
-            plt.close()
-            print("Generated move matches plot")
+            ax.set_title(titles[metric])
+            ax.set_xlabel("Rate Value (0-1)")
+            ax.set_ylabel("Frequency")
+            ax.grid(True, alpha=0.3, axis="y")
 
-    def print_summary_statistics(self):
-        """Print summary statistics from the training."""
-        if self.metrics is None:
-            print("No metrics loaded. Call load_metrics() first.")
-            return
+            # Add a more descriptive x-axis
+            bin_labels = []
+            for i in range(len(bins) - 1):
+                bin_labels.append(f"{bins[i]:.2f}-{bins[i+1]:.2f}")
 
-        print("\n===== TRAINING SUMMARY STATISTICS =====")
-
-        # Episode information
-        total_episodes = len(self.metrics.get("episode_rewards", []))
-        print(f"Total Episodes: {total_episodes}")
-
-        # Final metrics
-        if "avg_rewards" in self.metrics and self.metrics["avg_rewards"]:
-            print(f"Final Average Reward: {self.metrics['avg_rewards'][-1]:.2f}")
-
-        if "avg_episode_length" in self.metrics and self.metrics["avg_episode_length"]:
-            print(
-                f"Final Average Episode Length: {self.metrics['avg_episode_length'][-1]:.1f} steps"
+            plt.xticks(
+                [(bins[i] + bins[i + 1]) / 2 for i in range(len(bins) - 1)],
+                bin_labels,
+                rotation=45,
             )
 
-        if (
-            "avg_perfect_accuracy" in self.metrics
-            and self.metrics["avg_perfect_accuracy"]
-        ):
-            print(
-                f"Final Perfect Move Accuracy: {self.metrics['avg_perfect_accuracy'][-1]:.2%}"
-            )
+            # Add a text annotation with the total percentage
+            plt.figtext(0.9, 0.01, f"Total: {total_pct:.1f}%", ha="right")
 
-        if "avg_piece_accuracy" in self.metrics and self.metrics["avg_piece_accuracy"]:
-            print(
-                f"Final Piece Selection Accuracy: {self.metrics['avg_piece_accuracy'][-1]:.2%}"
-            )
+            plt.tight_layout()
+            plt.savefig(f"{metric}_histogram.png")
 
-        if "avg_dest_accuracy" in self.metrics and self.metrics["avg_dest_accuracy"]:
-            print(
-                f"Final Destination Accuracy: {self.metrics['avg_dest_accuracy'][-1]:.2%}"
-            )
+            # Don't use plt.show() when using Agg backend
+            plt.close(fig)
 
-        # Game outcomes
-        if (
-            all(key in self.metrics for key in ["win_rate", "draw_rate", "loss_rate"])
-            and self.metrics["win_rate"]
-        ):
-            print(f"\nFinal Win Rate: {self.metrics['win_rate'][-1]:.2%}")
-            print(f"Final Draw Rate: {self.metrics['draw_rate'][-1]:.2%}")
-            print(f"Final Loss Rate: {self.metrics['loss_rate'][-1]:.2%}")
+            print(f"Histogram saved to {metric}_histogram.png")
+        else:
+            print(f"Metric '{metric}' not found in the data")
 
 
+# Main execution block
 def main():
-    """Main function to handle command-line arguments."""
-    parser = argparse.ArgumentParser(description="Visualize Chess RL training metrics")
-    parser.add_argument(
-        "--metrics_dir",
-        type=str,
-        required=True,
-        help="Directory containing training metrics JSON files",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=None,
-        help="Directory to save output plots (default: metrics_dir/plots)",
-    )
-    parser.add_argument(
-        "--figsize",
-        type=float,
-        nargs=2,
-        default=[10, 6],
-        help="Figure size (width, height) in inches",
-    )
-    parser.add_argument("--dpi", type=int, default=100, help="DPI for saved figures")
+    # Specify the TensorBoard log directory
+    log_dir = "./trained_models/self/tensorboard/"
 
-    args = parser.parse_args()
+    try:
+        # Extract metrics
+        print(f"Extracting metrics from {log_dir}...")
+        df = extract_metrics_from_tensorboard(log_dir)
 
-    # Create visualizer
-    visualizer = ChessMetricsVisualizer(args.metrics_dir, args.output_dir)
+        # Display basic statistics
+        print("\nBasic Statistics:")
+        print(df.describe())
 
-    # Load metrics
-    if visualizer.load_metrics():
-        # Generate plots
-        visualizer.generate_plots(figsize=tuple(args.figsize), dpi=args.dpi)
+        # Save to CSV for further analysis
+        df.to_csv("chess_quality_metrics.csv", index=False)
+        print("Metrics saved to chess_quality_metrics.csv")
 
-        # Print summary
-        visualizer.print_summary_statistics()
-    else:
-        print("Failed to load metrics. Check the provided directory path.")
+        # Create histograms with fixed percentage calculation
+        print("\nCreating histograms with fixed percentages...")
+        visualize_histograms(df, bins=[0, 0.25, 0.5, 0.8, 0.9, 1.0])
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
